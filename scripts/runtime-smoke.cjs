@@ -1,0 +1,97 @@
+// Exercises the real Electron IPC and renderer against a local mock API.
+// Run with the Electron executable; all data goes into a new temporary directory.
+const { app, BrowserWindow } = require('electron');
+const fs = require('node:fs/promises');
+const path = require('node:path');
+const os = require('node:os');
+const assert = require('node:assert/strict');
+const http = require('node:http');
+const JSZip = require('jszip');
+const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+const timer = setTimeout(() => { console.error('Runtime smoke timed out'); app.exit(1); }, 90000);
+
+(async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'reader-v02-runtime-'));
+  const vault = path.join(root, 'vault');
+  await fs.mkdir(path.join(root, 'books'));
+  const zip = new JSZip();
+  zip.file('mimetype', 'application/epub+zip');
+  zip.file('META-INF/container.xml', '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>');
+  zip.file('content.opf', '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">smoke</dc:identifier><dc:title>Runtime Book</dc:title><dc:language>en</dc:language><dc:creator>Test Author</dc:creator></metadata><manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="ch1" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="ch1"/></spine></package>');
+  zip.file('nav.xhtml', '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>Contents</title></head><body><nav epub:type="toc"><ol><li><a href="chapter.xhtml">Chapter One</a></li></ol></nav></body></html>');
+  zip.file('chapter.xhtml', '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter One</title></head><body><h1>Chapter One</h1><p>One small idea can become a meaningful action. This is a sample paragraph for testing reading and reflection.</p></body></html>');
+  const file = path.join(root, 'books', 'fixture.epub');
+  await fs.writeFile(file, await zip.generateAsync({ type: 'nodebuffer' }));
+  await fs.writeFile(path.join(root, 'library.json'), JSON.stringify({ vaultPath: vault, books: [{ id: 'fixture', file, title: 'Runtime Book', author: 'Test Author', progress: 0, notes: [{ id: 'selected', chapter: 'Chapter One', quote: 'One small idea can become an action.', text: 'My own thought', createdAt: new Date().toISOString() }, { id: 'unselected', quote: 'UNSELECTED_PRIVATE_NOTE', createdAt: new Date().toISOString() }], exportFile: '' }] }));
+  const bodies = []; let failFirst = true; let delayNext = false;
+  const server = http.createServer(async (request, response) => {
+    const chunks = []; for await (const chunk of request) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks)); bodies.push(body);
+    assert.equal(request.headers.authorization, 'Bearer runtime-test-secret');
+    if (delayNext) { delayNext = false; return; }
+    if (body.messages.length > 1 && failFirst) { failFirst = false; response.writeHead(401); response.end('runtime-test-secret'); return; }
+    response.setHeader('Content-Type', 'application/json');
+    response.end(JSON.stringify({ choices: [{ message: { content: body.messages.length > 3 ? 'SECOND_UNSAVED_REPLY' : 'Try one small action tomorrow. <img src=x onerror=alert(1)>' } }] }));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  process.env.EPUB_READER_DATA_DIR = root;
+  process.env.EPUB_READER_SMOKE = '1';
+  require('../electron/main.cjs');
+  await app.whenReady();
+  let window;
+  for (let i = 0; i < 100; i++) { window = BrowserWindow.getAllWindows()[0]; if (window) break; await pause(100); }
+  assert.ok(window);
+  window.webContents.on('console-message', (_event, _level, message) => { if (typeof message === 'string' && /error|failed/i.test(message)) console.error('Renderer:', message); });
+  const js = async code => { try { return await window.webContents.executeJavaScript(code); } catch (error) { console.error('UI script failed:', code); throw error; } };
+  const until = async code => { for (let i = 0; i < 100; i++) { if (await js(code)) return; await pause(100); } throw new Error('UI condition timed out: ' + code); };
+  await until('!!document.querySelector("[data-book]")');
+  await js('document.querySelector("[data-book]").click()');
+  await until('!document.querySelector("#book-loading") && !!document.querySelector("#epub-view iframe")');
+  assert.equal(await js('/AI|API/.test(document.querySelector(".main").textContent)'), false, 'AI controls must not appear on the reading page');
+  await js('document.querySelector("#finish-reading").click()');
+  await until('!!document.querySelector("#insight")');
+  await js('document.querySelector("#insight").value="我想把启发变成一个小行动";document.querySelector("[name=source-note]").checked=true;document.querySelector("#start-review").click()');
+  await until('!!document.querySelector("#chat-input")');
+  await js('document.querySelector("#ai-settings").click()');
+  const baseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+  await js(`document.querySelector('[name=baseUrl]').value=${JSON.stringify(baseUrl)};document.querySelector('[name=model]').value='mock-model';document.querySelector('[name=apiKey]').value='runtime-test-secret';document.querySelector('#test-api').click()`);
+  await until('document.querySelector("#api-status")?.textContent.includes("连接成功")');
+  const storedSettings = await fs.readFile(path.join(root, 'ai-settings.json'), 'utf8');
+  assert.ok(!storedSettings.includes('runtime-test-secret'));
+  assert.ok(!(await js('(async () => JSON.stringify(await readerAPI.aiSettings()))()')).includes('runtime-test-secret'));
+  await js('document.querySelector("#close-api").click();document.querySelector("#discuss-insight").click()');
+  await until('!!document.querySelector("#retry-chat")');
+  assert.ok(!(await js('document.querySelector(".main").textContent')).includes('runtime-test-secret'));
+  await js('document.querySelector("#retry-chat").click()');
+  await until('!!document.querySelector("[data-bookmark]")');
+  assert.equal(await js('document.querySelectorAll(".message.user:not(.inspiration)").length'), 1);
+  assert.equal(await js('document.querySelectorAll(".message img").length'), 0);
+  await js('document.querySelector("[data-bookmark]").click()');
+  await until('document.querySelector("[data-bookmark]")?.textContent.includes("已保留")');
+  await js('document.querySelector("#chat-input").value="如何观察结果";document.querySelector("#chat-form").requestSubmit()');
+  await until('document.querySelectorAll(".message.assistant").length===2');
+  await js('document.querySelector("#add-action").click();document.querySelector("[name=title]").value="明天工作前把手机放远一点";document.querySelector("[name=when]").value="明天早上";document.querySelector("[name=measure]").value="记录分心次数";document.querySelector("[name=result]").value="执行后观察到变化";document.querySelector("[name=done]").checked=true;document.querySelector("#action-form").requestSubmit()');
+  await until('!!document.querySelector(".action-card")');
+  const all = JSON.parse(await fs.readFile(path.join(root, 'reflections.json'), 'utf8'));
+  assert.equal(all[0].actions[0].done, true);
+  const folder = path.join(vault, 'EPUB 阅读笔记', 'V0.2', '读后回顾');
+  const output = await fs.readFile(path.join(folder, (await fs.readdir(folder))[0]), 'utf8');
+  assert.match(output, /明天工作前把手机放远一点/);
+  assert.doesNotMatch(output, /SECOND_UNSAVED_REPLY|UNSELECTED_PRIVATE_NOTE/);
+  assert.ok(bodies.every(body => !JSON.stringify(body).includes('UNSELECTED_PRIVATE_NOTE')));
+  window.showInactive(); await pause(400);
+  await fs.writeFile(path.join(root, 'review.png'), (await window.webContents.capturePage()).toPNG());
+  window.hide();
+  const geometry = await js('({width:innerWidth, scroll:document.documentElement.scrollWidth, actionVisible:document.querySelector(".action-panel").getBoundingClientRect().right <= innerWidth})');
+  assert.equal(geometry.scroll, geometry.width); assert.equal(geometry.actionVisible, true);
+  delayNext = true;
+  await js('document.querySelector("#chat-input").value="取消测试";document.querySelector("#chat-form").requestSubmit()');
+  await until('!!document.querySelector("#cancel-generation")');
+  await pause(200); await js('document.querySelector("#cancel-generation").click()');
+  await until('!!document.querySelector("#retry-chat")');
+  const { Reflections } = require('../electron/reflections.cjs');
+  const reopened = new Reflections(root); await reopened.init();
+  assert.equal(reopened.sessions[0].messages.at(-1).status, 'failed');
+  console.log(JSON.stringify({ readingWithoutAI: true, realIpcAndEncryption: true, failedRequestRetry: true, multiTurn: true, selectedSourcesOnly: true, selectedRepliesAndActionsExported: true, cancelAndPersistence: true, screenshot: path.join(root, 'review.png') }));
+  server.closeAllConnections(); server.close(); clearTimeout(timer); app.exit(0);
+})().catch(error => { console.error(error.stack); clearTimeout(timer); app.exit(1); });
