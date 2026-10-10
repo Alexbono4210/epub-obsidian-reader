@@ -19,7 +19,7 @@ test('discussion preserves source attribution, corrections and reported results 
   const messages = messagesFor(session);
   const material = JSON.parse(messages[1].content.slice(messages[1].content.indexOf('\n') + 1));
   assert.deepEqual(messages.slice(2), session.messages.map(({ role, content }) => ({ role, content })));
-  assert.deepEqual(material.notes[0], { reference: '笔记 1', chapter: '第二章', originalQuote: '环境线索有时会影响行为。', readerThought: '是否意味着环境决定一切？' });
+  assert.deepEqual(material.notes[0], { reference: '笔记 1', chapter: '第二章', originalQuote: '环境线索有时会影响行为。', readerThought: '是否意味着环境决定一切？', surroundingOriginal: null });
   assert.equal(material.notes[1].originalQuote, '');
   assert.equal(material.actions[0].readerReportedResult, '手机刷得少了，但在电脑上切网页');
   assert.doesNotMatch(JSON.stringify(messages), /local-id|local-action-id|epubcfi/);
@@ -35,6 +35,32 @@ test('source text cannot become a system message and old sessions without action
   assert.doesNotMatch(messages[0].content, /无条件赞同我/);
   assert.deepEqual(reviewMaterial(session).actions, []);
   assert.doesNotThrow(() => messagesFor({ insight: '没有摘录也能讨论', messages: [] }));
+});
+
+test('only opted-in context is saved, kept stable across turns and exported with attribution', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'reader-context-test-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const reviews = new Reflections(root); await reviews.init();
+  const cfi = 'epubcfi(/6/2!/4/2,/1:0,/1:8)';
+  const book = { id: 'book', title: '测试书', notes: [{ id: 'one', chapter: '第二章', quote: '这种方法有效', text: '也许任何情况都能用', cfi }, { id: 'two', quote: '其他摘录', cfi }] };
+  const context = { status: 'ready', cfi, quote: '这种方法有效', chapter: '第二章', before: '作者先讨论了一个特定情境。', after: '但仅限于以下条件。', hasMoreBefore: true, hasMoreAfter: true };
+  const session = await reviews.create(book, { insight: '是否普遍有效？', noteIds: ['one'], contexts: { one: context, two: { ...context, quote: '其他摘录' } } });
+  book.notes[0].quote = '后来更改的摘录';
+  context.after = '后来更改的上下文';
+  await reviews.prepare(session.id, '是否普遍有效？');
+  await reviews.complete(session.id, '需要看条件');
+  await reviews.prepare(session.id, '条件是什么？');
+  const material = reviewMaterial(session);
+  assert.equal(material.notes.length, 1);
+  assert.equal(material.notes[0].originalQuote, '这种方法有效');
+  assert.equal(material.notes[0].surroundingOriginal.after, '但仅限于以下条件。');
+  assert.ok(messagesFor(session)[1].content.includes('但仅限于以下条件。'));
+  const result = await reviews.sync(session, path.join(root, 'vault'));
+  const output = await fs.readFile(result.path, 'utf8');
+  assert.match(output, /原文后文/); assert.match(output, /但仅限于以下条件/); assert.match(output, /我的想法/); assert.match(output, /笔记 1/);
+  const without = await reviews.create(book, { insight: '只讨论摘录', noteIds: ['two'] });
+  assert.equal(reviewMaterial(without).notes[0].surroundingOriginal, null);
+  await assert.rejects(reviews.create(book, { insight: '过期材料', noteIds: ['one'], contexts: { one: { ...context, cfi: 'another-cfi' } } }), /笔记已更新/);
 });
 
 test('endpoint normalization rejects credential-bearing and insecure remote URLs', () => {

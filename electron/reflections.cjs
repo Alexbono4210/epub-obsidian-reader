@@ -8,6 +8,13 @@ const END = '<!-- EPUB_REFLECTION_END -->';
 const safe = value => String(value || '').replaceAll('<!-- EPUB_', '&lt;!-- EPUB_');
 const text = (value, max) => String(value || '').trim().slice(0, max);
 
+function noteContext(note, incoming) {
+  if (!incoming || incoming.status !== 'ready') return undefined;
+  if (!note.cfi || incoming.cfi !== note.cfi || incoming.quote !== (note.quote || '')) throw new Error('笔记已更新，请重新选择并预览上下文');
+  if (typeof incoming.before !== 'string' || typeof incoming.after !== 'string' || incoming.before.length > 1200 || incoming.after.length > 1200) throw new Error('原文上下文超出允许范围，请重新预览');
+  return { before: incoming.before, after: incoming.after, chapter: text(incoming.chapter, 600), hasMoreBefore: !!incoming.hasMoreBefore, hasMoreAfter: !!incoming.hasMoreAfter, crossesChapters: !!incoming.crossesChapters, scope: 'toc-bounded-spine-section' };
+}
+
 class Reflections {
   constructor(root) { this.file = path.join(root, 'reflections.json'); this.sessions = []; this.queue = Promise.resolve(); }
   enqueue(work) { const run = this.queue.then(work); this.queue = run.catch(() => {}); return run; }
@@ -24,7 +31,8 @@ class Reflections {
     const insight = text(input.insight, 12000);
     if (!insight) throw new Error('先写一点自己的想法，不需要完整或成熟');
     const ids = new Set(Array.isArray(input.noteIds) ? input.noteIds : []);
-    const notes = book.notes.filter(n => ids.has(n.id)).map(n => ({ id: n.id, chapter: n.chapter, quote: n.quote, text: n.text, cfi: n.cfi }));
+    const contexts = input.contexts && typeof input.contexts === 'object' ? input.contexts : {};
+    const notes = book.notes.filter(n => ids.has(n.id)).map(n => ({ id: n.id, chapter: n.chapter, quote: n.quote, text: n.text, cfi: n.cfi, context: noteContext(n, contexts[n.id]) }));
     if (JSON.stringify(notes).length + insight.length > 50000) throw new Error('选中的笔记太多，请选出与这次启发最相关的部分');
     const session = { id: crypto.randomUUID(), bookId: book.id, bookTitle: book.title, author: book.author, insight, notes, createdAt: new Date().toISOString(), messages: [], actions: [] };
     this.sessions.unshift(session);
@@ -78,10 +86,21 @@ class Reflections {
       await fs.mkdir(folder, { recursive: true });
       const file = path.join(folder, `${cleanName(session.bookTitle)} - 回顾 ${session.id.slice(0, 8)}.md`);
       const lines = [`# ${safe(session.bookTitle)} · 读后回顾`, '', '## 我的启发', '', safe(session.insight), '', '## 讨论材料', ''];
-      for (const note of session.notes) {
-        lines.push(`### ${safe(note.chapter || '阅读摘录')}`, '');
+      for (const [index, note] of session.notes.entries()) {
+        lines.push(`### 笔记 ${index + 1} · ${safe(note.context?.chapter || note.chapter || '阅读摘录')}`, '');
+        if (note.context) {
+          lines.push('**原文前文（同一节内的有限片段）**', '');
+          if (note.context.hasMoreBefore) lines.push('〔更早的前文省略〕', '');
+          if (note.context.before) lines.push(...safe(note.context.before).split(/\r?\n/).map(l => `> ${l}`), '');
+        }
+        lines.push('**原文摘录**', '');
         if (note.quote) lines.push(...safe(note.quote).split(/\r?\n/).map(l => `> ${l}`), '');
-        if (note.text) lines.push(safe(note.text), '');
+        if (note.context) {
+          lines.push('**原文后文（同一节内的有限片段）**', '');
+          if (note.context.after) lines.push(...safe(note.context.after).split(/\r?\n/).map(l => `> ${l}`), '');
+          if (note.context.hasMoreAfter) lines.push('〔后续原文省略〕', '');
+        }
+        if (note.text) lines.push('**我的想法**', '', safe(note.text), '');
       }
       lines.push('## 我选择保留的 AI 对话', '');
       session.messages.forEach((message, index) => {

@@ -2,6 +2,17 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('readerAPI', {
   getState: () => ipcRenderer.invoke('state:get'),
+  setFullscreen: (enabled) => ipcRenderer.invoke('window:setFullscreen', enabled),
+  onFullscreenChange: (callback) => {
+    const listener = (_event, enabled) => callback(enabled);
+    ipcRenderer.on('window:fullscreenChanged', listener);
+    return () => ipcRenderer.removeListener('window:fullscreenChanged', listener);
+  },
+  onReadingShortcut: (callback) => {
+    const listener = (_event, key) => callback(key);
+    ipcRenderer.on('window:readingShortcut', listener);
+    return () => ipcRenderer.removeListener('window:readingShortcut', listener);
+  },
   importBooks: () => ipcRenderer.invoke('books:import'),
   getBook: (id) => ipcRenderer.invoke('books:get', id),
   updateBook: (id, changes) => ipcRenderer.invoke('books:update', id, changes),

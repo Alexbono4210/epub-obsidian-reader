@@ -17,6 +17,17 @@ let theme = localStorage.getItem('readerTheme') || 'paper';
 let savePositionTimer;
 let opening = false;
 let view = 'shelf';
+let focusedReading = false;
+let focusChanging = false;
+let focusChangePromise;
+let readerResizeObserver;
+let readerResizeTimer;
+let lastReaderCfi = '';
+
+function readingLocation() {
+  try { return rendition?.manager ? rendition.currentLocation()?.start || rendition.location?.start : undefined; }
+  catch { return rendition?.location?.start; }
+}
 
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 const currentBook = () => state.books.find((book) => book.id === currentId);
@@ -34,6 +45,8 @@ function toast(message, error = false) {
 
 function render() {
   app.dataset.theme = theme;
+  app.classList.toggle('focused-reading', focusedReading);
+  app.classList.toggle('focus-note-open', Boolean(selected));
   app.innerHTML = `
     <aside class="sidebar">
       <button class="brand brand-home" id="home" title="返回书架"><span class="brand-mark">页</span><div><strong>页间</strong><small>V0.2 · READING SPACE</small></div></button>
@@ -65,8 +78,9 @@ function readerHtml() {
   const book = currentBook();
   return `<header class="topbar">
     <div class="book-heading"><p>正在阅读 <span> / </span> ${escapeHtml(book.author || '未知作者')}</p><h2>${escapeHtml(book.title)}</h2></div>
-    <div class="top-actions"><button class="icon-btn" id="font-down" title="缩小字体">A−</button><span class="font-value">${fontSize}%</span><button class="icon-btn" id="font-up" title="放大字体">A＋</button><span class="divider"></span><button class="icon-btn theme-toggle" id="theme" title="切换阅读主题">${theme === 'paper' ? '◐' : '☼'}</button><button class="secondary-btn finish-btn" id="finish-reading">结束本次阅读 →</button></div>
+    <div class="top-actions"><button class="icon-btn" id="font-down" title="缩小字体">A−</button><span class="font-value">${fontSize}%</span><button class="icon-btn" id="font-up" title="放大字体">A＋</button><span class="divider"></span><button class="icon-btn theme-toggle" id="theme" title="切换阅读主题">${theme === 'paper' ? '◐' : '☼'}</button><button class="secondary-btn" id="focus-reading" title="全屏专注阅读 · F11" aria-pressed="false">专注阅读</button><button class="secondary-btn focus-note-btn" id="focus-note">随手记</button><button class="secondary-btn finish-btn" id="finish-reading">结束本次阅读 →</button></div>
   </header>
+  <div class="focus-hover-zone" aria-hidden="true"></div><div class="focus-hint">专注阅读 · 顶部显示操作 · Esc 退出</div>
   <div class="reader-body">
     <section class="reading-column"><div class="chapter-strip"><button id="toc-toggle" class="chapter-toggle">☷ <span id="chapter-label">目录</span></button><span id="page-status">${percent(book.progress)}</span></div><div class="reading-frame"><div id="epub-view"></div><div id="book-loading">正在打开电子书…</div></div><footer class="reading-footer"><button id="prev" aria-label="上一页">← <span>上一页</span></button><div class="progress-track"><i id="progress-bar" style="width:${percent(book.progress)}"></i></div><span id="progress-text">${percent(book.progress)}</span><button id="next" aria-label="下一页"><span>下一页</span> →</button></footer></section>
     <aside class="notes-panel"><div class="notes-head"><div><p class="eyebrow">READING NOTES</p><h3>摘录与笔记 <span id="notes-count">${book.notes.length}</span></h3></div><button id="sync-now" title="立即同步到 Obsidian">↻</button></div><div class="notes-subtitle">选中原文记笔记，或直接写下想法。<button id="quick-note" class="quick-note">＋ 随手记</button></div><div id="selection-panel" class="selection-panel hidden"></div><div id="notes-list" class="notes-list"></div><div class="notes-footer"><span class="sync-dot ${state.vaultPath ? 'connected' : ''}"></span><span>${state.vaultPath ? '笔记自动同步到 Obsidian' : '连接 Obsidian 后自动同步'}</span>${book.exportFile ? '<button id="open-export">打开笔记 ↗</button>' : ''}</div></aside>
@@ -106,8 +120,10 @@ async function importBooks() {
 }
 
 function bindReader() {
+  document.getElementById('focus-reading').onclick = () => setFocusedReading(!focusedReading);
+  document.getElementById('focus-note').onclick = () => document.getElementById('quick-note').click();
   document.getElementById('quick-note').onclick = () => {
-    const cfi = rendition?.currentLocation()?.start?.cfi || '';
+    const cfi = readingLocation()?.cfi || lastReaderCfi || currentBook()?.cfi || '';
     selected = { quote: '', cfi, chapter: chapterForLocation(), chapterIndex: epub?.spine.get(cfi)?.index };
     activeNoteId = null; renderSelection(); document.getElementById('note-text').focus();
   };
@@ -130,7 +146,7 @@ function bindReader() {
   renderNotes();
 }
 
-async function openBook(id) {
+async function openBook(id, targetCfi) {
   if (opening) return;
   opening = true;
   try {
@@ -140,6 +156,7 @@ async function openBook(id) {
     rendition = null;
     epub = null;
     currentId = id;
+    lastReaderCfi = targetCfi || currentBook()?.cfi || '';
     view = 'reader';
     selected = null;
     activeNoteId = null;
@@ -163,6 +180,22 @@ async function openBook(id) {
     toc = navigation.toc || [];
     renderToc();
     rendition = epub.renderTo('epub-view', { width: '100%', height: '100%', flow: 'paginated', spread: 'none', allowScriptedContent: false });
+    rendition.hooks.content.register(contents => contents.document.addEventListener('keydown', readingKeydown));
+    rendition.on('resized', () => {
+      // A hidden window may resize before the first RAF location report.
+      if (!rendition.location?.start) rendition.display(lastReaderCfi || undefined);
+    });
+    const openedRenderer = rendition;
+    const viewport = document.getElementById('epub-view');
+    readerResizeObserver = new ResizeObserver(() => {
+      clearTimeout(readerResizeTimer);
+      readerResizeTimer = setTimeout(() => {
+        if (rendition !== openedRenderer || !viewport.isConnected || !openedRenderer.manager?.isRendered() || !openedRenderer.location?.start) return;
+        const { width, height } = viewport.getBoundingClientRect();
+        if (width > 0 && height > 0) openedRenderer.resize(width, height, openedRenderer.location.start.cfi);
+      }, 100);
+    });
+    readerResizeObserver.observe(viewport);
     applyTheme();
     rendition.themes.fontSize(`${fontSize}%`);
     rendition.on('selected', (cfi, contents) => {
@@ -178,6 +211,7 @@ async function openBook(id) {
     rendition.on('relocated', (location) => {
       const cfi = location?.start?.cfi;
       if (!cfi) return;
+      lastReaderCfi = cfi;
       const progress = epub.locations.length() ? epub.locations.percentageFromCfi(cfi) : currentBook()?.progress || 0;
       updateProgress(progress);
       clearTimeout(savePositionTimer);
@@ -187,7 +221,8 @@ async function openBook(id) {
         catch (error) { toast(`保存阅读位置失败：${error.message}`, true); }
       }, 500);
     });
-    await rendition.display(currentBook().cfi || undefined);
+    await rendition.display(targetCfi || currentBook().cfi || undefined);
+    lastReaderCfi = readingLocation()?.cfi || lastReaderCfi;
     document.getElementById('book-loading')?.remove();
     currentBook().notes.forEach(addHighlight);
     const openedEpub = epub;
@@ -205,6 +240,9 @@ async function openBook(id) {
 }
 
 async function leaveReading() {
+  if (focusedReading) await setFocusedReading(false);
+  readerResizeObserver?.disconnect();
+  clearTimeout(readerResizeTimer);
   clearTimeout(savePositionTimer);
   const location = rendition?.currentLocation()?.start;
   if (view === 'reader' && currentId && location?.cfi) {
@@ -277,6 +315,7 @@ function addHighlight(note) {
 
 function renderSelection() {
   const panel = document.getElementById('selection-panel');
+  app.classList.toggle('focus-note-open', Boolean(selected));
   if (!selected) { panel.classList.add('hidden'); return; }
   panel.classList.remove('hidden');
   panel.innerHTML = `<div class="selection-heading"><span>${activeNoteId ? '编辑笔记' : '新摘录'}</span><button id="selection-close">×</button></div>${selected.quote ? `<blockquote>${escapeHtml(short(selected.quote, 240))}</blockquote>` : ''}<textarea id="note-text" placeholder="写下你的想法…" rows="3">${escapeHtml(selected.text || '')}</textarea><div class="selection-actions"><span>${selected.quote ? '原文将自动划线' : '随手记'}</span><button id="save-note">保存笔记 →</button></div>`;
@@ -331,10 +370,39 @@ function renderNotes() {
   });
 }
 
-document.addEventListener('keydown', (event) => {
-  if (!rendition || ['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) return;
-  if (event.key === 'ArrowLeft') rendition.prev();
-  if (event.key === 'ArrowRight') rendition.next();
+function readingKeydown(event) {
+  if (view !== 'reader' || event.repeat) return;
+  if (event.key === 'Escape' && focusedReading) { event.preventDefault(); setFocusedReading(false); return; }
+  if (event.key === 'F11') { event.preventDefault(); setFocusedReading(!focusedReading); return; }
+  if (!rendition || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.target?.closest?.('input, textarea, select, button, [contenteditable="true"]')) return;
+  if (event.key === 'ArrowLeft') { event.preventDefault(); rendition.prev(); }
+  if (event.key === 'ArrowRight') { event.preventDefault(); rendition.next(); }
+}
+
+function applyFocusLayout(enabled) {
+  focusedReading = enabled && view === 'reader';
+  app.classList.toggle('focused-reading', focusedReading);
+  const button = document.getElementById('focus-reading');
+  if (button) { button.textContent = focusedReading ? '退出专注 · Esc' : '专注阅读'; button.setAttribute('aria-pressed', String(focusedReading)); }
+}
+
+async function setFocusedReading(enabled) {
+  if (focusChanging) await focusChangePromise;
+  if (enabled && (view !== 'reader' || !rendition)) return;
+  focusChanging = true;
+  const previous = focusedReading;
+  applyFocusLayout(enabled);
+  if (enabled && document.activeElement?.id === 'focus-reading') document.activeElement.blur();
+  try { focusChangePromise = api.setFullscreen(enabled); await focusChangePromise; }
+  catch (error) { applyFocusLayout(previous); toast(`切换全屏失败：${error.message}`, true); }
+  finally { focusChanging = false; }
+}
+
+document.addEventListener('keydown', readingKeydown);
+api.onFullscreenChange(enabled => applyFocusLayout(enabled));
+api.onReadingShortcut(key => {
+  if (key === 'Escape') setFocusedReading(false);
+  else if (view === 'reader') setFocusedReading(!focusedReading);
 });
 
 api.getState().then((result) => { state = result; render(); }).catch((error) => { app.textContent = `启动失败：${error.message}`; });

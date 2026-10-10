@@ -62,6 +62,15 @@ function createWindow() {
   });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
+  window.on('enter-full-screen', () => window.webContents.send('window:fullscreenChanged', true));
+  window.on('leave-full-screen', () => window.webContents.send('window:fullscreenChanged', false));
+  window.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown' || input.isAutoRepeat) return;
+    if (input.key === 'F11' || (input.key === 'Escape' && window.isFullScreen())) {
+      event.preventDefault();
+      window.webContents.send('window:readingShortcut', input.key);
+    }
+  });
   window.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
 }
 
@@ -76,6 +85,11 @@ app.whenReady().then(async () => {
   await settings.init();
   await reflections.init();
   ipcMain.handle('state:get', () => store.publicState());
+  ipcMain.handle('window:setFullscreen', (event, enabled) => {
+    if (typeof enabled !== 'boolean' || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) throw new Error('无效的窗口操作');
+    window.setFullScreen(enabled);
+    return enabled;
+  });
   ipcMain.handle('books:import', async () => {
     const result = await dialog.showOpenDialog(window, {
       title: '导入 EPUB',
