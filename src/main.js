@@ -1,4 +1,5 @@
 import ePub from 'epubjs';
+import { flattenToc, chapterAt } from './chapters.mjs';
 import './style.css';
 
 const api = window.readerAPI;
@@ -154,7 +155,9 @@ async function openBook(id) {
     rendition.on('selected', (cfi, contents) => {
       const quote = contents.window.getSelection()?.toString().trim() || '';
       if (quote) {
-        selected = { quote, cfi, chapter: chapterForLocation() };
+        const section = epub.spine.get(cfi);
+        const range = contents.window.getSelection()?.getRangeAt(0);
+        selected = { quote, cfi, chapter: chapterAt(toc, section?.href, contents.document, range), chapterIndex: section?.index };
         activeNoteId = null;
         renderSelection();
       }
@@ -202,9 +205,8 @@ function adjustFont(change) {
 }
 
 function renderToc() {
-  const flat = (items, depth = 0) => items.flatMap((item) => [{ label: item.label, href: item.href, depth }, ...flat(item.subitems || [], depth + 1)]);
-  document.getElementById('toc-list').innerHTML = flat(toc).map((item, index) => `<button data-toc="${index}" style="padding-left:${18 + item.depth * 15}px">${escapeHtml(item.label)}</button>`).join('') || '<p class="toc-empty">这本书没有目录</p>';
-  const entries = flat(toc);
+  const entries = flattenToc(toc);
+  document.getElementById('toc-list').innerHTML = entries.map((item, index) => `<button data-toc="${index}" style="padding-left:${18 + item.depth * 15}px">${escapeHtml(item.label)}</button>`).join('') || '<p class="toc-empty">这本书没有目录</p>';
   document.querySelectorAll('[data-toc]').forEach((node) => node.onclick = () => {
     rendition?.display(entries[Number(node.dataset.toc)].href);
     document.getElementById('toc-popover').classList.add('hidden');
@@ -212,9 +214,11 @@ function renderToc() {
 }
 
 function chapterForLocation() {
-  const href = rendition?.currentLocation()?.start?.href;
-  const section = toc.find((item) => href && item.href?.split('#')[0] === href.split('#')[0]);
-  return section?.label || '阅读摘录';
+  const location = rendition?.currentLocation()?.start;
+  const contents = rendition?.getContents().find((item) => item.sectionIndex === epub?.spine.get(location?.cfi)?.index);
+  let range;
+  try { if (location?.cfi && contents) range = contents.range(location.cfi); } catch {}
+  return chapterAt(toc, location?.href, contents?.document, range);
 }
 
 function updateProgress(value) {
@@ -264,7 +268,7 @@ function editNote(id) {
   const note = currentBook()?.notes.find((item) => item.id === id);
   if (!note) return;
   activeNoteId = id;
-  selected = { quote: note.quote, text: note.text, cfi: note.cfi, chapter: note.chapter };
+  selected = { quote: note.quote, text: note.text, cfi: note.cfi, chapter: note.chapter, chapterIndex: note.chapterIndex };
   renderSelection();
   document.getElementById('note-text').focus();
 }

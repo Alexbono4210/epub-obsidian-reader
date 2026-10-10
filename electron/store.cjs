@@ -4,6 +4,8 @@ const crypto = require('node:crypto');
 
 const START = '<!-- EPUB_READER_START -->';
 const END = '<!-- EPUB_READER_END -->';
+const NOTES_START = '<!-- EPUB_READER_NOTES_START -->';
+const NOTES_END = '<!-- EPUB_READER_NOTES_END -->';
 
 function cleanName(value) {
   return String(value || '未命名').replace(/[<>:"/\\|?*\x00-\x1f]/g, ' ').replace(/[. ]+$/g, '').replace(/\s+/g, ' ').trim().slice(0, 90) || '未命名';
@@ -17,8 +19,38 @@ function safeManagedText(value) {
   return String(value || '').replaceAll('<!-- EPUB_READER_', '&lt;!-- EPUB_READER_');
 }
 
-function markdown(book) {
-  const notes = [...(book.notes || [])].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+function chapterIndex(note) {
+  if (Number.isInteger(note.chapterIndex) && note.chapterIndex >= 0) return note.chapterIndex;
+  const match = String(note.cfi || '').match(/^epubcfi\(\/\d+(?:\[[^\]]*\])?\/(\d+)/);
+  return match ? Number(match[1]) / 2 - 1 : Number.MAX_SAFE_INTEGER;
+}
+
+function notesMarkdown(book) {
+  const notes = [...(book.notes || [])].sort((a, b) => chapterIndex(a) - chapterIndex(b) || a.createdAt.localeCompare(b.createdAt));
+  const groups = new Map();
+  for (const note of notes) {
+    const chapter = String(note.chapter || '').trim() || '未命名章节';
+    const key = `${chapterIndex(note)}:${chapter}`;
+    if (!groups.has(key)) groups.set(key, { chapter, notes: [] });
+    groups.get(key).notes.push(note);
+  }
+  const lines = ['## 摘录与笔记', ''];
+  if (!notes.length) lines.push('暂无笔记。', '');
+  for (const group of groups.values()) {
+    lines.push(`### ${safeManagedText(group.chapter)}`, '');
+    group.notes.forEach((note, index) => {
+      if (index) lines.push('---', '');
+      if (note.quote) {
+        for (const line of safeManagedText(note.quote).split(/\r?\n/)) lines.push(`> ${line}`);
+        lines.push('');
+      }
+      if (note.text) lines.push(safeManagedText(note.text).trim(), '');
+    });
+  }
+  return lines.join('\n').trimEnd() + '\n';
+}
+
+function markdownHeader(book) {
   const lines = [
     '---',
     `title: ${yamlString(book.title)}`,
@@ -32,32 +64,23 @@ function markdown(book) {
     '',
     book.author ? `作者：${safeManagedText(book.author)}` : '',
     book.progress ? `阅读进度：${Math.round(book.progress * 100)}%` : '',
-    '',
-    '## 摘录与笔记',
     ''
   ].filter((line, index, all) => !(line === '' && all[index - 1] === ''));
 
-  if (!notes.length) lines.push('暂无笔记。', '');
-  for (const note of notes) {
-    lines.push(`### ${safeManagedText(note.chapter || '未命名章节')}`, '');
-    if (note.quote) {
-      for (const line of safeManagedText(note.quote).split(/\r?\n/)) lines.push(`> ${line}`);
-      lines.push('');
-    }
-    if (note.text) lines.push(safeManagedText(note.text).trim(), '');
-    lines.push(`记录时间：${note.createdAt.replace('T', ' ').slice(0, 16)}`, '');
-    lines.push(`位置：\`${note.cfi || ''}\``, '');
-  }
-  return lines.join('\n').trimEnd() + '\n';
+  return lines.join('\n').trimEnd() + '\n\n';
 }
 
-function replaceManaged(existing, generated) {
-  const managed = `${START}\n${generated}${END}`;
+function markdown(book) {
+  return markdownHeader(book) + notesMarkdown(book);
+}
+
+function replaceManaged(existing, generated, startMarker = START, endMarker = END) {
+  const managed = `${startMarker}\n${generated}${endMarker}`;
   if (!existing) return managed + '\n';
-  const start = existing.indexOf(START);
-  const end = existing.indexOf(END);
+  const start = existing.indexOf(startMarker);
+  const end = existing.indexOf(endMarker);
   if (start === -1 || end === -1 || end < start) return null;
-  return existing.slice(0, start) + managed + existing.slice(end + END.length);
+  return existing.slice(0, start) + managed + existing.slice(end + endMarker.length);
 }
 
 async function atomicWrite(file, content) {
@@ -134,6 +157,7 @@ class ReaderStore {
       text: String(note.text || '').slice(0, 20000),
       cfi: String(note.cfi || '').slice(0, 3000),
       chapter: String(note.chapter || '').slice(0, 300),
+      chapterIndex: Number.isInteger(note.chapterIndex) && note.chapterIndex >= 0 ? note.chapterIndex : existing?.chapterIndex,
       createdAt: existing?.createdAt || now,
       updatedAt: now
     };
@@ -183,11 +207,15 @@ class ReaderStore {
     let existing = '';
     try { existing = await fs.readFile(target, 'utf8'); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
-    const content = replaceManaged(existing, markdown(book));
+    const content = !existing
+      ? markdownHeader(book) + replaceManaged('', notesMarkdown(book), NOTES_START, NOTES_END)
+      : existing.includes(NOTES_START)
+        ? replaceManaged(existing, notesMarkdown(book), NOTES_START, NOTES_END)
+        : replaceManaged(existing, markdown(book));
     if (content === null) throw new Error(`目标文件已存在且不是本阅读器创建的笔记：${target}`);
     await atomicWrite(target, content);
     return { status: 'synced', path: target };
   }
 }
 
-module.exports = { ReaderStore, cleanName, markdown, replaceManaged };
+module.exports = { ReaderStore, cleanName, markdown, notesMarkdown, replaceManaged, NOTES_START, NOTES_END };
