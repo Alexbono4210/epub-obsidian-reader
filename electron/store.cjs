@@ -115,7 +115,12 @@ class ReaderStore {
   async persist() { await atomicWrite(this.file, JSON.stringify(this.data, null, 2)); }
 
   publicState() {
-    return { vaultPath: this.data.vaultPath, books: this.data.books.map(({ file, ...book }) => book) };
+    return {
+      vaultPath: this.data.vaultPath,
+      exportFolder: this.exportFolder,
+      exportDirectory: this.data.vaultPath ? path.join(this.data.vaultPath, this.exportFolder) : '',
+      books: this.data.books.map(({ file, ...book }) => book)
+    };
   }
 
   book(id) {
@@ -179,6 +184,9 @@ class ReaderStore {
   }
 
   async setVault(folder) {
+    if (folder !== this.data.vaultPath) {
+      for (const book of this.data.books) delete book.lastSync;
+    }
     this.data.vaultPath = folder;
     await this.persist();
     return this.syncAll();
@@ -191,8 +199,18 @@ class ReaderStore {
   }
 
   async syncSafely(book) {
-    try { return await this.syncBook(book); }
-    catch (error) { return { status: 'error', message: error.message }; }
+    let result;
+    try { result = await this.syncBook(book); }
+    catch (error) { result = { status: 'error', message: error.message }; }
+    result = { ...result, bookId: book.id, at: new Date().toISOString() };
+    book.lastSync = result;
+    try { await this.persist(); }
+    catch (error) {
+      // Export and status persistence are separate outcomes. Keep a successful
+      // Markdown write successful even if its local status cannot be recorded.
+      result.warning = `同步状态未能保存，重启后可能显示旧状态：${error.message}`;
+    }
+    return result;
   }
 
   async syncBook(book) {

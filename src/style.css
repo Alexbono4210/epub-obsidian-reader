@@ -7,6 +7,7 @@
 
 /* Focused reading keeps one page centered; controls appear on hover or keyboard focus. */
 .focus-hover-zone,.focus-hint,.focus-note-btn{display:none}
+.sync-destination{margin-top:12px;font-size:10px;color:#829483;line-height:1.8;overflow-wrap:anywhere}.sync-destination strong{display:block;font-weight:500;color:#4e7058}.sync-tools{display:flex;gap:13px;margin-top:7px}.sync-tools button{border:0;background:transparent;color:#50745a;font-size:10px;padding:3px 0}.sync-dot.sync-failed{background:#bf6a4d;box-shadow:0 0 0 3px #bf6a4d1a}.sync-label{min-width:0;align-items:flex-start;line-height:1.6}.sync-label .sync-dot{margin-top:5px}.sync-error{color:#a65e45;overflow-wrap:anywhere;font-size:10px;max-height:65px;overflow:auto}.notes-footer{align-items:flex-start;flex-direction:column;gap:8px}.notes-footer #open-export{margin-left:0;padding:0;color:#456e52}.notes-footer #open-export[hidden]{display:none}
 #app.focused-reading{min-height:0;background:#faf8f3}
 #app.focused-reading .sidebar{display:none}
 #app.focused-reading .topbar{position:absolute;inset:0 0 auto;height:80px;z-index:10;background:#f8f6f0;opacity:0;pointer-events:none;transition:opacity .15s;box-shadow:0 4px 18px #0000000a}

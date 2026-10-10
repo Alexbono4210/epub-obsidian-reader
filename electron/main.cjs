@@ -84,6 +84,7 @@ app.whenReady().then(async () => {
   reflections = new Reflections(root);
   await settings.init();
   await reflections.init();
+  await store.enqueue(() => store.syncAll());
   ipcMain.handle('state:get', () => store.publicState());
   ipcMain.handle('window:setFullscreen', (event, enabled) => {
     if (typeof enabled !== 'boolean' || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) throw new Error('无效的窗口操作');
@@ -120,13 +121,20 @@ app.whenReady().then(async () => {
     return store.enqueue(() => store.setVault(result.filePaths[0]));
   });
   ipcMain.handle('vault:syncAll', () => store.enqueue(() => store.syncAll()));
+  ipcMain.handle('vault:openFolder', async () => {
+    if (!store.data.vaultPath) throw new Error('请先选择 Obsidian 仓库文件夹');
+    const folder = path.join(store.data.vaultPath, exportFolder);
+    await fs.access(folder);
+    const error = await shell.openPath(folder);
+    if (error) throw new Error(error);
+  });
   ipcMain.handle('vault:openExport', async (_event, id) => {
     const book = store.book(id);
-    if (!store.data.vaultPath || !book.exportFile) return false;
-    const file = path.join(store.data.vaultPath, exportFolder, book.exportFile);
-    const error = await shell.openPath(file);
-    if (error) throw new Error(error);
-    return true;
+    const sync = await store.enqueue(() => store.syncSafely(book));
+    if (sync.status === 'not-configured') throw new Error('请先选择 Obsidian 仓库文件夹');
+    if (sync.status !== 'synced') throw new Error(sync.message || '这本书还没有可同步的笔记，请先记录一条笔记');
+    await shell.openExternal(`obsidian://open?path=${encodeURIComponent(sync.path)}`);
+    return { state: store.publicState(), sync };
   });
   ipcMain.handle('ai:settings', () => settings.publicState());
   ipcMain.handle('ai:configure', (_event, input) => settings.save(input || {}));
@@ -163,8 +171,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('review:openExport', async (_event, id) => {
     const result = await reflections.enqueue(() => reflections.sync(reflections.get(id), store.data.vaultPath));
     if (result.status !== 'synced') return result;
-    const error = await shell.openPath(result.path);
-    if (error) throw new Error(error);
+    await shell.openExternal(`obsidian://open?path=${encodeURIComponent(result.path)}`);
     return result;
   });
   createWindow();

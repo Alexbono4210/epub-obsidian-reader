@@ -1,6 +1,6 @@
 // Exercises the real Electron IPC and renderer against a local mock API.
 // Run with the Electron executable; all data goes into a new temporary directory.
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, shell } = require('electron');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
@@ -9,6 +9,8 @@ const http = require('node:http');
 const JSZip = require('jszip');
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const timer = setTimeout(() => { console.error('Runtime smoke timed out'); app.exit(1); }, 90000);
+const openedLinks = [];
+shell.openExternal = async uri => { openedLinks.push(uri); };
 
 (async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'reader-v02-runtime-'));
@@ -62,6 +64,28 @@ const timer = setTimeout(() => { console.error('Runtime smoke timed out'); app.e
   await js('document.querySelector("[data-book]").click()');
   await until('!document.querySelector("#book-loading") && !!document.querySelector("#epub-view iframe")');
   assert.equal(await js('/AI|API/.test(document.querySelector(".main").textContent)'), false, 'AI controls must not appear on the reading page');
+  const startupState = await js('readerAPI.getState()');
+  const exportPath = path.join(startupState.exportDirectory, startupState.books[0].exportFile);
+  assert.equal(startupState.exportDirectory, path.join(vault, 'EPUB 阅读笔记', 'V0.2'));
+  assert.equal(startupState.books[0].lastSync.status, 'synced', 'Startup must synchronize pending reading notes');
+  assert.ok(await js('document.querySelector(".sync-destination").textContent.includes("V0.2")'));
+  const existingExport = await fs.readFile(exportPath, 'utf8');
+  await fs.writeFile(exportPath, 'UNMANAGED_TEST_FILE');
+  await js('document.querySelector("#sync-now").click()');
+  await until('!!document.querySelector("[data-sync-status=book] .sync-error")');
+  assert.equal(await fs.readFile(exportPath, 'utf8'), 'UNMANAGED_TEST_FILE');
+  assert.equal((await js('readerAPI.getState()')).books[0].lastSync.status, 'error');
+  await fs.writeFile(exportPath, existingExport);
+  await js('document.querySelector("#retry-sync").click()');
+  await until('!!document.querySelector("[data-sync-status=book] .connected") && !document.querySelector("#retry-sync").disabled');
+  assert.equal((await js('readerAPI.getState()')).books[0].lastSync.status, 'synced');
+  await js('document.querySelector("#open-export").click()');
+  for (let i = 0; i < 30 && !openedLinks.length; i++) await pause(100);
+  const openLink = new URL(openedLinks[0]);
+  assert.equal(openLink.protocol, 'obsidian:');
+  assert.equal(openLink.host, 'open');
+  assert.equal(openLink.searchParams.get('path'), exportPath);
+  console.log('Sync checks passed: V0.2 destination, startup sync, visible failure, successful retry and exact Obsidian note link.');
   window.showInactive();
   await js('document.querySelector("#focus-reading").click();document.querySelector("#focus-reading").blur()');
   await until('document.querySelector("#app").classList.contains("focused-reading")');
@@ -207,7 +231,10 @@ const timer = setTimeout(() => { console.error('Runtime smoke timed out'); app.e
   assert.equal(quoteNote.quote, quote); assert.ok(quoteNote.cfi);
   await js('document.querySelector("#focus-reading").click()');
   await until('!document.querySelector("#app").classList.contains("focused-reading")');
-  await pause(600); await until(quoteVisible);
+  await pause(600);
+  await fs.writeFile(path.join(root, 'after-focus.png'), (await window.webContents.capturePage()).toPNG());
+  assert.equal((await js('readerAPI.getState()')).books[0].cfi, quoteNote.cfi, 'Fullscreen reflow must retain the selected reading anchor');
+  await until(quoteVisible);
   console.log('Fullscreen checks passed: native window, hidden sidebars, hover controls, iframe paging, preserved drafts and reading position, quote notes, Esc/F11, review exit.');
   console.log(JSON.stringify({ readingWithoutAI: true, realIpcAndEncryption: true, failedRequestRetry: true, multiTurn: true, selectedSourcesOnly: true, selectedRepliesAndActionsExported: true, cancelAndPersistence: true, surroundingTextVerified: true, crossParagraphRange: true, invalidPositionRejected: true, contextOptOut: true, sourceNavigation: true, screenshot: path.join(root, 'review.png') }));
   server.closeAllConnections(); server.close(); clearTimeout(timer); app.exit(0);

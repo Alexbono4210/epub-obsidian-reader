@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('readerAPI', {
   deleteNote: (id, noteId) => ipcRenderer.invoke('notes:delete', id, noteId),
   chooseVault: () => ipcRenderer.invoke('vault:choose'),
   syncAll: () => ipcRenderer.invoke('vault:syncAll'),
+  openSyncFolder: () => ipcRenderer.invoke('vault:openFolder'),
   openExport: (id) => ipcRenderer.invoke('vault:openExport', id),
   aiSettings: () => ipcRenderer.invoke('ai:settings'),
   configureAi: (input) => ipcRenderer.invoke('ai:configure', input),

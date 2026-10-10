@@ -48,8 +48,84 @@ test('unmanaged existing files are never overwritten', async (t) => {
   await store.setVault(vault);
   const result = await store.saveNote(id, { quote: '摘录', text: '', cfi: '', chapter: '' });
   assert.equal(result.sync.status, 'error');
+  assert.equal(result.sync.bookId, id);
+  assert.deepEqual(result.state.books[0].lastSync, result.sync);
   assert.equal(await fs.readFile(target, 'utf8'), '这是原有笔记');
   assert.equal(store.book(id).notes.length, 1);
+  const restarted = new ReaderStore(path.join(root, 'data'));
+  await restarted.init();
+  assert.equal(restarted.book(id).notes.length, 1);
+  assert.equal(restarted.book(id).lastSync.status, 'error');
+  await fs.writeFile(target, '<!-- EPUB_READER_NOTES_START -->\n<!-- EPUB_READER_NOTES_END -->\n');
+  const retried = await restarted.syncAll();
+  assert.equal(retried.results[0].status, 'synced');
+  assert.equal(retried.results[0].bookId, id);
+  assert.equal(retried.state.books[0].lastSync.path, target);
+  assert.match(await fs.readFile(target, 'utf8'), /摘录/);
+  const afterRetry = new ReaderStore(path.join(root, 'data'));
+  await afterRetry.init();
+  assert.deepEqual(afterRetry.book(id).lastSync, retried.results[0]);
+});
+
+test('V0.2 reports and persists its separate export directory without changing a same-name V0.1 file', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'epub-reader-v02-sync-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const exportFolder = path.join('EPUB 阅读笔记', 'V0.2');
+  const store = new ReaderStore(path.join(root, 'data'), exportFolder);
+  await store.init();
+  assert.equal(store.publicState().exportDirectory, '');
+  assert.equal(store.publicState().exportFolder, exportFolder);
+  const id = 'c'.repeat(64);
+  store.data.books.push({ id, file: '', title: '同一本书', notes: [], exportFile: '同一本书.md' });
+  const vault = path.join(root, 'vault');
+  const legacyFile = path.join(vault, 'EPUB 阅读笔记', '同一本书.md');
+  await fs.mkdir(path.dirname(legacyFile), { recursive: true });
+  const legacyContent = '# 原版文件\n原版记录';
+  await fs.writeFile(legacyFile, legacyContent);
+  await store.setVault(vault);
+  const saved = await store.saveNote(id, { text: '只属于 V0.2 的新笔记', chapter: '第一章' });
+  const target = path.join(vault, exportFolder, '同一本书.md');
+  assert.equal(saved.sync.status, 'synced');
+  assert.equal(saved.sync.path, target);
+  assert.equal(saved.sync.bookId, id);
+  assert.ok(Number.isFinite(Date.parse(saved.sync.at)));
+  assert.equal(saved.state.exportDirectory, path.dirname(target));
+  assert.deepEqual(saved.state.books[0].lastSync, saved.sync);
+  assert.equal(await fs.readFile(legacyFile, 'utf8'), legacyContent);
+  assert.match(await fs.readFile(target, 'utf8'), /只属于 V0.2 的新笔记/);
+  const restarted = new ReaderStore(path.join(root, 'data'), exportFolder);
+  await restarted.init();
+  assert.deepEqual(restarted.book(id).lastSync, saved.sync);
+  await restarted.setVault('');
+  assert.equal(restarted.publicState().exportDirectory, '');
+  assert.equal(restarted.book(id).lastSync.status, 'not-configured');
+  assert.equal(restarted.book(id).lastSync.path, undefined);
+  const disconnected = new ReaderStore(path.join(root, 'data'), exportFolder);
+  await disconnected.init();
+  assert.equal(disconnected.book(id).lastSync.status, 'not-configured');
+});
+
+test('a status persistence failure does not misreport a successful Markdown export', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'epub-reader-sync-status-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const store = new ReaderStore(path.join(root, 'data'));
+  await store.init();
+  const id = 'd'.repeat(64);
+  store.data.books.push({ id, file: '', title: '测试书', notes: [], exportFile: '测试书.md' });
+  await store.setVault(path.join(root, 'vault'));
+  const persist = store.persist.bind(store);
+  let writes = 0;
+  store.persist = async () => {
+    if (++writes === 2) throw new Error('模拟状态文件暂时不可写');
+    return persist();
+  };
+  const saved = await store.saveNote(id, { text: '已在本地保存，也已导出' });
+  assert.equal(saved.sync.status, 'synced');
+  assert.match(saved.sync.warning, /同步状态未能保存/);
+  assert.match(await fs.readFile(saved.sync.path, 'utf8'), /已在本地保存，也已导出/);
+  const restarted = new ReaderStore(path.join(root, 'data'));
+  await restarted.init();
+  assert.equal(restarted.book(id).notes.length, 1);
 });
 
 test('managed section replacement leaves surrounding content intact', () => {
