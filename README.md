@@ -2,9 +2,13 @@
 
 本地 EPUB 阅读器。阅读时记录摘录和自己的想法；结束本次阅读后，进入独立的读后回顾页面，先写下启发，再用自己配置的 API 与 AI 讨论，选一个小行动，执行后回来记录结果。
 
+当前版本：**v0.2.1**。查看 [更新记录](CHANGELOG.md) 和 [版本管理说明](docs/版本管理.md)。原版保存在 `v0.1.0` 标签及 `legacy/v0.1` 分支。
+
 ## 双击启动
 
 双击本文件夹里的 `打开阅读器.cmd`，或 `release/页间/页间 V0.2.exe`。便携版无需安装 Node.js。整个 `release/页间` 文件夹需要保留在一起。
+
+GitHub 仓库提供源码，`release` 构建目录不包含在源码下载中。从源码启动需要 Node.js 22.12+：运行 `npm ci`，再运行 `npm start`。在 Windows 上运行 `npm run package` 生成便携版后，即可双击启动。
 
 ## 使用流程
 
@@ -18,7 +22,7 @@
 
 ## 数据与旧版
 
-- V0.1 源码与便携版保留在上一级文件夹。
+- V0.1 源码通过标签 `v0.1.0` 和分支 `legacy/v0.1` 保留。
 - V0.2 数据独立保存在 `%APPDATA%/epub-obsidian-reader-v02`，第一次启动复制 V0.1 的书籍、笔记、阅读位置和 Obsidian 设置。以后两个版本的数据各自保存。
 - V0.2 摘录与回顾写入 Obsidian 的 `EPUB 阅读笔记/V0.2`；第一次迁移也复制已有导出文件，保留手动编辑的说明。旧版导出文件继续保留。
 - 左下角显示实际同步目录与最近同步结果；启动时重试阅读笔记同步。同步失败会持续显示原因，可点击“重新同步”。阅读笔记面板的“在 Obsidian 打开”会定位到 V0.2 的对应笔记，使用 [Obsidian URI](https://help.obsidian.md/Extending+Obsidian/Obsidian+URI)。
@@ -51,10 +55,10 @@ AI 默认先理解并检验你的想法，给出有依据的判断或不同意�
 
 ## 源码开发
 
-需要 Node.js 20.19+。
+需要 Node.js 22.12+；当前便携打包脚本用于 Windows。
 
 ```powershell
-npm install
+npm ci
 npm start
 npm test
 npm run test:runtime
@@ -62,5 +66,7 @@ npm run package
 ```
 
 运行时测试使用临时数据、合成 EPUB 和本机模拟 API，不读取个人书籍，不调用收费服务。打包输出到 `release/页间`，源码中的 `release/` 不纳入 Git。
+
+提交到 `main` 或创建 Pull Request 时，GitHub Actions 自动运行单元测试及构建。涉及窗口与阅读交互的改动，还需本地运行 `npm run test:runtime`。
 
 实现参考：[Chat Completions 接口文档](https://developers.openai.com/api/reference/resources/chat)、[Electron safeStorage 文档](https://www.electronjs.org/docs/latest/api/safe-storage)。

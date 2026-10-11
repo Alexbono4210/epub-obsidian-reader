@@ -11,3 +11,8 @@ ai-settings.json
 library.json
 reflections.json
 *.epub
+.env
+.env.*
+!.env.example
+*.zip
+*.tmp

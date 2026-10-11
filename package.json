@@ -1,6 +1,6 @@
 {
   "name": "epub-obsidian-reader-v02",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "A local EPUB reader that syncs reading notes to an Obsidian vault",
   "main": "electron/main.cjs",
